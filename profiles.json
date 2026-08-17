@@ -1,0 +1,186 @@
+{
+  "tubi": {
+    "A": {
+      "type": "button",
+      "index": 0
+    },
+    "X": {
+      "type": "button",
+      "index": 2
+    },
+    "Y": {
+      "type": "button",
+      "index": 3
+    },
+    "B": {
+      "type": "button",
+      "index": 1
+    },
+    "LB": {
+      "type": "button",
+      "index": 4
+    },
+    "RB": {
+      "type": "button",
+      "index": 5
+    },
+    "BACK": {
+      "type": "button",
+      "index": 6
+    },
+    "START": {
+      "type": "button",
+      "index": 7
+    },
+    "LT": {
+      "type": "axis",
+      "index": 4
+    },
+    "RT": {
+      "type": "axis",
+      "index": 5
+    }
+  },
+  "tubi2": {
+    "A": {
+      "type": "button",
+      "index": 0
+    },
+    "X": {
+      "type": "button",
+      "index": 2
+    },
+    "Y": {
+      "type": "button",
+      "index": 3
+    },
+    "B": {
+      "type": "button",
+      "index": 1
+    },
+    "LB": {
+      "type": "button",
+      "index": 4
+    },
+    "RB": {
+      "type": "button",
+      "index": 5
+    },
+    "BACK": {
+      "type": "button",
+      "index": 6
+    },
+    "START": {
+      "type": "button",
+      "index": 7
+    },
+    "LT": {
+      "type": "axis",
+      "index": 4
+    },
+    "RT": {
+      "type": "axis",
+      "index": 5
+    }
+  },
+  "tubi3": {
+    "A": {
+      "type": "button",
+      "index": 0
+    },
+    "B": {
+      "type": "button",
+      "index": 1
+    },
+    "X": {
+      "type": "button",
+      "index": 2
+    },
+    "Y": {
+      "type": "button",
+      "index": 3
+    },
+    "LB": {
+      "type": "button",
+      "index": 4
+    },
+    "RB": {
+      "type": "button",
+      "index": 5
+    },
+    "BACK": {
+      "type": "button",
+      "index": 6
+    },
+    "START": {
+      "type": "button",
+      "index": 7
+    },
+    "LS": {
+      "type": "button",
+      "index": 8
+    },
+    "RS": {
+      "type": "button",
+      "index": 9
+    },
+    "LT": {
+      "type": "axis",
+      "index": 4
+    },
+    "RT": {
+      "type": "axis",
+      "index": 5
+    }
+  },
+  "tubi4": {
+    "A": {
+      "type": "button",
+      "index": 0
+    },
+    "B": {
+      "type": "button",
+      "index": 1
+    },
+    "X": {
+      "type": "button",
+      "index": 2
+    },
+    "Y": {
+      "type": "button",
+      "index": 3
+    },
+    "LB": {
+      "type": "button",
+      "index": 4
+    },
+    "RB": {
+      "type": "button",
+      "index": 5
+    },
+    "BACK": {
+      "type": "button",
+      "index": 6
+    },
+    "START": {
+      "type": "button",
+      "index": 7
+    },
+    "LS": {
+      "type": "button",
+      "index": 8
+    },
+    "RS": {
+      "type": "button",
+      "index": 9
+    },
+    "LT": {
+      "type": "axis",
+      "index": 4
+    },
+    "RT": {
+      "type": "axis",
+      "index": 5
+    }
+  }
+}
