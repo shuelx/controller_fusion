@@ -109,6 +109,47 @@ auto-instalar Python) y correr `python controller_fusion.py --setup`.
    floodear con eventos de ejes). Esta integrado como paso opcional al
    principio de `--setup`.
 
+## Bug real encontrado y resuelto: boton "pegado" por mapear un eje a un boton normal
+
+Un fightstick andaba perfecto conectado directo y perfecto via Parsec, pero al
+pasar por `controller_fusion.py` R1 (RB) quedaba **permanentemente apretado**
+y anulaba las apretadas reales del companiero que compartia el mismo virtual
+(merge = OR logico: si una fuente ya tiene el boton en true todo el tiempo, el
+juego nunca ve el flanco de "recien apretado" de la otra fuente, asi que su
+apretada real no genera ningun cambio visible - no es que se "pisen", es que
+el compañero nunca logra generar una apretada nueva mientras el fantasma sigue
+prendido).
+
+**Causa real:** durante `--profile-create`, en algun momento el wizard capturo
+un movimiento de EJE (el gatillo L2, eje 4) en vez de una apretada de BOTON
+para RB. Los gatillos (L2/R2) en un mando Xbox descansan en -1.0 y van a +1.0
+al presionar - **nunca pasan por 0**. Como el codigo interpreta "esta
+apretado" para botones no-gatillo con `abs(valor) > 0.5`, un eje de gatillo
+mal asignado a un boton normal da `abs(~1.0) > 0.5` = **true todo el tiempo**,
+apretado o no. Se encontraron varios perfiles en `profiles.json` con este
+mismo patron (RB/LT/RT/LS cross-wireados entre si) de intentos de calibracion
+anteriores - no era un caso aislado.
+
+**Fix aplicado:**
+1. En `controller_fusion.py`, `_create_profile_interactive` ahora usa
+   `_capture_for()`, que **rechaza automaticamente** una captura de tipo eje
+   para cualquier boton que no sea LT/RT, y le pide a la persona que vuelva a
+   apretar. Esto deberia prevenir que este bug se vuelva a guardar en silencio.
+2. Para el caso puntual: el `--diagnose` de ese fightstick (antes de que
+   empezara a fallar) ya habia mostrado que reporta el layout Xbox estandar
+   de punta a punta (botones 0-7, ejes 4/5 igual que cualquier pad). O sea
+   **nunca necesito un perfil custom** - el lio vino de calibrar a mano algo
+   que ya andaba bien por defecto. Se cambio `session.json` para que ese
+   indice use perfil `null` (standard) en vez de uno de los perfiles rotos.
+
+**Leccion para el futuro:** antes de crear un perfil custom para un control
+nuevo, correr `--diagnose` primero. Si el layout ya sale estandar (botones
+0-9 tipicos, ejes 4/5 para gatillos), **no hace falta perfil custom**, usar
+standard directamente evita este tipo de error de calibracion humana.
+Quedaron varios perfiles de prueba con nombres tipo `guasa`, `guasssss`,
+`tubi2`, `bake1`, etc en `profiles.json` de intentos previos - son basura de
+debugging, se pueden borrar cuando el usuario confirme que no los necesita.
+
 ## Pendiente / proximo paso: HidHide
 
 **Esto es lo que sigue, no esta hecho todavia.**
