@@ -302,27 +302,6 @@ def _wait_for_input(j, timeout=15):
     return None
 
 
-def _capture_for(j, key, max_tries=3):
-    """Waits for the physical input for logical button `key`, rejecting an axis capture
-    for anything that isn't a trigger (LT/RT). A real button on an Xbox-layout controller
-    should never come through as an axis - if it does, we almost certainly caught a
-    trigger's motion event instead of the intended button (this is exactly what once made
-    RB read as permanently pressed: it got mapped to a trigger axis, which never rests at
-    0, so "is it pressed" was always true). Better to make the person redo it than save it."""
-    for _ in range(max_tries):
-        r = _wait_for_input(j)
-        if r is None:
-            return None
-        kind, index = r
-        if kind == "axis" and key not in ("LT", "RT"):
-            print(f"    -> that was a trigger/axis moving (axis {index}), not a button press.")
-            print(f"       {key} needs a real button. Press the actual button for {key} now...")
-            continue
-        return (kind, index)
-    print(f"    -> kept getting a trigger instead of a button, giving up on {key} for now.")
-    return None
-
-
 def _create_profile_interactive(j, name):
     print(f"\nCreating profile '{name}' for {j.get_name()}")
     print("You'll press, one at a time, the button that does each function on YOUR controller.")
@@ -331,7 +310,7 @@ def _create_profile_interactive(j, name):
     profile = {}
     for key in REQUIRED_BUTTONS:
         print(f"  Press: {FRIENDLY_NAME[key]}  [{key}]")
-        r = _capture_for(j, key)
+        r = _wait_for_input(j)
         if r is None:
             print("    -> timeout, left unassigned (you can edit profiles.json by hand later).")
             continue
@@ -346,7 +325,7 @@ def _create_profile_interactive(j, name):
         if r_in != "y":
             continue
         print("    Press the button...")
-        r = _capture_for(j, key)
+        r = _wait_for_input(j)
         if r is None:
             print("    -> timeout, skipped.")
             continue
@@ -506,7 +485,12 @@ def _read_state(j, profile):
             val = ax(spec["index"])
             if name in ("LT", "RT"):
                 return val
-            return abs(val) > 0.5
+            # Same rest(-1)/pressed(+1) convention as a real trigger - some fightsticks
+            # report ordinary buttons this way instead of as a digital button event.
+            # NOT abs(val): at rest this axis already sits near -1 (magnitude ~1), so
+            # abs()>threshold would read "pressed" all the time. Only the positive end
+            # (near +1) means actually pressed.
+            return val > 0.5
 
     st = {
         "LX": ax(AXES["LX"]), "LY": ax(AXES["LY"]),
@@ -675,4 +659,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nCancelled.")
+        sys.exit(1)
