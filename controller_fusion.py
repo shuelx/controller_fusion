@@ -39,6 +39,18 @@ import os
 import json
 import subprocess
 import msvcrt
+import ctypes
+
+_VK_LBUTTON = 0x01
+
+
+def _left_mouse_down():
+    # While the left button is held (e.g. dragging the GUI window by its
+    # title bar), pygame's SDL event pump drains Windows' message queue and
+    # ends up swallowing the drag's own mouse-move messages before the OS
+    # can apply them, making the window seem stuck. Skipping the pump during
+    # that window avoids the conflict - see GUI polling loop.
+    return ctypes.windll.user32.GetAsyncKeyState(_VK_LBUTTON) & 0x8000 != 0
 
 
 def _ensure_package(import_name, pip_name=None):
@@ -877,15 +889,36 @@ def cmd_gui():
     root.update_idletasks()
     relayout_all()
 
+    # <Configure> fires on every MOVE too, not just resize - doing the full
+    # relayout (dozens of widgets + update_idletasks()) on every single pixel
+    # while the user drags the window title bar is what made the window feel
+    # like it was fighting the drag (and, on a slower machine, reportedly
+    # crashed outright). Fix: only relayout when the SIZE actually changed,
+    # and debounce it (wait for movement/resizing to settle) instead of
+    # doing it synchronously inside the event, which can run nested inside
+    # Windows' own modal drag/resize loop.
+    resize_state = {"last_size": (win_w, win_h), "job": None}
+
+    def _do_relayout():
+        resize_state["job"] = None
+        # the pool/P1/P2 frames use relative placement, so their own new
+        # geometry isn't final yet at this exact instant - flush it first,
+        # otherwise cards get positioned against stale frame sizes (this is
+        # what made a card overlap the P1 label when maximizing, before).
+        root.update_idletasks()
+        layout_zone_frames()
+        relayout_all()
+
     def on_resize(ev):
-        if ev.widget is root:
-            # the pool/P1/P2 frames use relative placement, so on a resize their
-            # own new geometry isn't final yet at this exact instant - flush it
-            # first, otherwise cards get positioned against stale frame sizes
-            # (this is what made a card overlap the P1 label when maximizing).
-            root.update_idletasks()
-            layout_zone_frames()
-            relayout_all()
+        if ev.widget is not root:
+            return
+        new_size = (root.winfo_width(), root.winfo_height())
+        if new_size == resize_state["last_size"]:
+            return  # just moved, not resized - nothing to recompute
+        resize_state["last_size"] = new_size
+        if resize_state["job"] is not None:
+            root.after_cancel(resize_state["job"])
+        resize_state["job"] = root.after(120, _do_relayout)
 
     root.bind("<Configure>", on_resize)
 
@@ -920,7 +953,7 @@ def cmd_gui():
     last_states = {}
 
     def fast_tick():
-        if not main_poll_paused["v"]:
+        if not main_poll_paused["v"] and not _left_mouse_down():
             try:
                 for ev in pygame.event.get():
                     if ev.type in (pygame.JOYBUTTONDOWN, pygame.JOYHATMOTION):
@@ -1155,6 +1188,9 @@ def cmd_gui():
         def editor_poll():
             if not win.winfo_exists():
                 return
+            if _left_mouse_down():
+                win.after(30, editor_poll)
+                return
             for ev in pygame.event.get():
                 eid = getattr(ev, "instance_id", getattr(ev, "joy", None))
                 if eid != j.get_instance_id() or waiting["key"] is None:
@@ -1360,7 +1396,7 @@ def cmd_gui():
             idx = combo.current()
             j = cards[idx]["j"] if 0 <= idx < len(cards) else None
 
-            if j is not None:
+            if j is not None and not _left_mouse_down():
                 for ev in pygame.event.get():
                     eid = getattr(ev, "instance_id", getattr(ev, "joy", None))
                     if eid != j.get_instance_id() or ev.type != pygame.JOYBUTTONDOWN:
