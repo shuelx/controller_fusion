@@ -23,6 +23,13 @@ function Test-PythonWorks {
     }
 }
 
+# Refresh PATH from the registry unconditionally, before the first check -
+# if Python was installed in a DIFFERENT session (this script run earlier,
+# or installed by hand), this process's inherited PATH can still be stale
+# and wrongly report "not found", triggering a pointless reinstall attempt.
+$env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") +
+            ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+
 Write-Host "Checking for Python 3.9+..."
 
 if (Test-PythonWorks) {
