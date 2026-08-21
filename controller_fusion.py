@@ -19,6 +19,9 @@ Usage:
     python controller_fusion.py --setup                     -> interactive wizard: assigns each detected
                                                                 gamepad to P1/P2 and to a profile, saves
                                                                 session.json and starts playing right away
+    python controller_fusion.py --gui                       -> same as --setup but with a window: drag
+                                                                each gamepad's card into P1/P2, pick a
+                                                                profile per card, then Start
     python controller_fusion.py                             -> runs. Uses session.json if present,
                                                                 otherwise falls back to the CONFIG block below
 
@@ -449,6 +452,823 @@ def cmd_setup():
     run()
 
 
+PAD_DIAGRAM_SCALE = 1.3
+PAD_DIAGRAM_W, PAD_DIAGRAM_H = round(176 * PAD_DIAGRAM_SCALE), round(62 * PAD_DIAGRAM_SCALE)
+
+
+def _draw_pad_diagram(canvas, scale=1.0):
+    """Draws a small generic gamepad schematic on `canvas` (not brand-accurate, just
+    enough to tell buttons apart, with everything spaced so labels never touch a
+    neighboring shape) and returns ({logical_name: canvas_item_id}, {name: (cx, cy,
+    move_radius)}) - the second dict is only for the stick dots, so the caller can
+    reposition them live with canvas.coords() instead of just recoloring them.
+    Coordinates below are the base (scale=1.0) layout; everything is multiplied by
+    `scale` so the same drawing can be shown bigger without redoing the numbers.
+    The left stick gets an actual moving dot (reuses the gap between the D-pad and
+    the face buttons, no extra room needed); the right stick only gets a plain
+    click (R3) indicator for now - left was asked for as the priority, right can
+    follow later using the same technique if it turns out to matter."""
+    def s(v):
+        return v * scale
+
+    def sf(pt):
+        return max(6, round(pt * scale))
+
+    OFF = "#dddddd"
+    OUT = "#999999"
+    ids = {}
+    meta = {}
+
+    # Row 1: shoulders, with Back/Select + Start in the gap between them
+    ids["LB"] = canvas.create_rectangle(s(2), s(2), s(24), s(14), fill=OFF, outline=OUT)
+    canvas.create_text(s(13), s(8), text="LB", font=("Segoe UI", sf(6)))
+    ids["LT"] = canvas.create_rectangle(s(26), s(2), s(48), s(14), fill=OFF, outline=OUT)
+    canvas.create_text(s(37), s(8), text="LT", font=("Segoe UI", sf(6)))
+    ids["BACK"] = canvas.create_oval(s(66), s(2), s(78), s(14), fill=OFF, outline=OUT)
+    ids["START"] = canvas.create_oval(s(84), s(2), s(96), s(14), fill=OFF, outline=OUT)
+    ids["RB"] = canvas.create_rectangle(s(126), s(2), s(148), s(14), fill=OFF, outline=OUT)
+    canvas.create_text(s(137), s(8), text="RB", font=("Segoe UI", sf(6)))
+    ids["RT"] = canvas.create_rectangle(s(150), s(2), s(172), s(14), fill=OFF, outline=OUT)
+    canvas.create_text(s(161), s(8), text="RT", font=("Segoe UI", sf(6)))
+    # ovals are too small to hold "back"/"start" themselves, label just below
+    canvas.create_text(s(72), s(17), text="back", font=("Segoe UI", sf(5)))
+    canvas.create_text(s(90), s(17), text="start", font=("Segoe UI", sf(5)))
+
+    # Row 2: D-pad (left) and face buttons (right)
+    ids["dpad_up"] = canvas.create_rectangle(s(26), s(22), s(38), s(34), fill=OFF, outline=OUT)
+    ids["dpad_down"] = canvas.create_rectangle(s(26), s(46), s(38), s(58), fill=OFF, outline=OUT)
+    ids["dpad_left"] = canvas.create_rectangle(s(14), s(34), s(26), s(46), fill=OFF, outline=OUT)
+    ids["dpad_right"] = canvas.create_rectangle(s(38), s(34), s(50), s(46), fill=OFF, outline=OUT)
+    canvas.create_rectangle(s(26), s(34), s(38), s(46), fill="#eeeeee", outline=OUT)
+
+    ids["Y"] = canvas.create_oval(s(124), s(22), s(136), s(34), fill=OFF, outline=OUT)
+    canvas.create_text(s(130), s(28), text="Y", font=("Segoe UI", sf(6)))
+    ids["X"] = canvas.create_oval(s(112), s(34), s(124), s(46), fill=OFF, outline=OUT)
+    canvas.create_text(s(118), s(40), text="X", font=("Segoe UI", sf(6)))
+    ids["B"] = canvas.create_oval(s(136), s(34), s(148), s(46), fill=OFF, outline=OUT)
+    canvas.create_text(s(142), s(40), text="B", font=("Segoe UI", sf(6)))
+    ids["A"] = canvas.create_oval(s(124), s(46), s(136), s(58), fill=OFF, outline=OUT)
+    canvas.create_text(s(130), s(52), text="A", font=("Segoe UI", sf(6)))
+
+    # Left stick: sits in the gap between the D-pad and the face buttons. The
+    # dot both moves (direction) and recolors (L3 click), same item for both.
+    lcx, lcy, lr, ldot = 78, 40, 12, 3.5
+    canvas.create_rectangle(s(lcx - lr), s(lcy - lr), s(lcx + lr), s(lcy + lr),
+                             fill="#f4f4f4", outline=OUT)
+    ids["LS"] = canvas.create_oval(s(lcx - ldot), s(lcy - ldot), s(lcx + ldot), s(lcy + ldot),
+                                    fill=OFF, outline=OUT)
+    meta["LS"] = (s(lcx), s(lcy), s(lr - ldot), s(ldot))
+
+    # Right stick: click only for now (R3), no dot movement - see docstring.
+    ids["RS"] = canvas.create_oval(s(156), s(34), s(168), s(46), fill=OFF, outline=OUT)
+
+    return ids, meta
+
+
+def _update_pad_diagram(canvas, ids, meta, st):
+    """Colors/moves a diagram drawn by _draw_pad_diagram according to a _read_state()
+    result. `meta` positions the stick dot(s) - see _draw_pad_diagram."""
+    ON = "#7CFC00"
+    OFF = "#dddddd"
+    for name in ("A", "B", "X", "Y", "LB", "RB", "BACK", "START", "LS", "RS"):
+        canvas.itemconfig(ids[name], fill=ON if st["buttons"].get(name) else OFF)
+    canvas.itemconfig(ids["LT"], fill=ON if st["LT"] > 0.5 else OFF)
+    canvas.itemconfig(ids["RT"], fill=ON if st["RT"] > 0.5 else OFF)
+    dx, dy = st["dpad"]
+    canvas.itemconfig(ids["dpad_up"], fill=ON if dy > 0 else OFF)
+    canvas.itemconfig(ids["dpad_down"], fill=ON if dy < 0 else OFF)
+    canvas.itemconfig(ids["dpad_left"], fill=ON if dx < 0 else OFF)
+    canvas.itemconfig(ids["dpad_right"], fill=ON if dx > 0 else OFF)
+
+    cx, cy, r, dot_r = meta["LS"]
+    lx = max(-1.0, min(1.0, st["LX"]))
+    ly = max(-1.0, min(1.0, st["LY"]))
+    px, py = cx + lx * r, cy + ly * r
+    canvas.coords(ids["LS"], px - dot_r, py - dot_r, px + dot_r, py + dot_r)
+
+
+def cmd_gui():
+    try:
+        import tkinter as tk
+        from tkinter import ttk, messagebox
+    except ImportError:
+        print("Missing tkinter. It ships with the standard python.org Windows installer -")
+        print("if it's missing, reinstall Python from python.org with the default options.")
+        sys.exit(1)
+
+    # Check every dependency up front, before the window even opens, instead of
+    # only finding out vgamepad/ViGEmBus has a problem the first time someone
+    # hits Start mid-session. pygame is already checked at import time (top of
+    # this file); this just adds the one that --gui specifically needs.
+    vg_module = {"vg": _ensure_package("vgamepad")}
+
+    _init_pygame()
+    js = _gamepads()
+    # unlike the other commands, the GUI still opens with zero gamepads connected -
+    # you can plug one in and hit Refresh instead of having to relaunch the app
+
+    profiles = _load_profiles()
+    profile_names = ["standard"] + sorted(profiles.keys())
+    standard_profile = _standard_profile()
+
+    def resolve_profile(name):
+        return profiles.get(name, standard_profile) if name != "standard" else standard_profile
+
+    CARD_W, CARD_H = 250, 155
+
+    root = tk.Tk()
+    root.title("controller_fusion setup")
+
+    # Fit the initial size to whatever screen this is, instead of a fixed 900x748
+    # that overflows on a 720p laptop. Still resizable so it can also grow on a
+    # bigger monitor - everything below reflows on resize (see on_resize).
+    screen_w = root.winfo_screenwidth()
+    screen_h = root.winfo_screenheight()
+    win_w = max(700, min(1300, screen_w - 40))
+    win_h = max(560, min(780, screen_h - 100))
+    root.geometry(f"{win_w}x{win_h}")
+    root.minsize(700, 560)
+    root.resizable(True, True)
+
+    # Toggle, not a one-shot Start: flips sending input to the virtual pad(s) on
+    # and off without ever closing this window. Off by default so dragging cards
+    # around while setting up teams can't accidentally send input mid-shuffle.
+    live_btn = tk.Button(root, text="Start", bg="#c8f7c8")
+    live_btn.place(relx=1.0, rely=0.0, x=-100, y=6, width=90, height=24)
+
+    # Re-scans connected gamepads. Only meant to be used while stopped (disabled
+    # while live) - re-detecting hardware mid-merge is what we're avoiding here.
+    refresh_btn = tk.Button(root, text="Refresh")
+    refresh_btn.place(relx=1.0, rely=0.0, x=-176, y=6, width=70, height=24)
+
+    # Opens the latency test in its own window - see open_latency_test below.
+    latency_btn = tk.Button(root, text="Latency test")
+    latency_btn.place(relx=1.0, rely=0.0, x=-266, y=6, width=84, height=24)
+
+    # Narrow strip on the right: what each virtual pad actually receives, merged
+    # across everyone on that side - for validating "am I in the right spot"
+    # without a popup (that could get opened twice - it did) and without eating
+    # into the pool's height budget (width had more slack than height at 720p).
+    RIGHT_COL_W = 150
+
+    combined_col = tk.LabelFrame(root, text="Combined")
+    combined_col.place(relx=1.0, rely=0.0, x=-(RIGHT_COL_W + 10), y=30,
+                        width=RIGHT_COL_W, relheight=1.0, height=-52)
+
+    COMBINED_SCALE = 0.7
+    combined_panels = {}
+    for n, side in enumerate(("P1", "P2")):
+        tk.Label(combined_col, text=side, font=("Segoe UI", 9, "bold")).place(x=6, y=6 + n * 90)
+        cc = tk.Canvas(combined_col, width=round(176 * COMBINED_SCALE), height=round(62 * COMBINED_SCALE),
+                       bg="white", highlightthickness=1, highlightbackground="#999999")
+        cc.place(x=6, y=22 + n * 90)
+        cids, cmeta = _draw_pad_diagram(cc, scale=COMBINED_SCALE)
+        combined_panels[side] = (cc, cids, cmeta)
+
+    # Frames use relative (%) placement so they scale with the window; card
+    # positions inside them get recomputed in relayout_all() on every resize.
+    # Pool gets the most room since worst case (extra/spare controllers waiting
+    # to rotate in) everyone could be sitting there unassigned at once. Width is
+    # trimmed by the combined-view column above.
+    pool = tk.LabelFrame(root, text="Detected gamepads - drag a card by its dark header")
+    pool.place(relx=0.0, rely=0.0, relwidth=1.0, relheight=0.62, x=10, y=30,
+               width=-(30 + RIGHT_COL_W), height=-36)
+
+    zone_p1 = tk.LabelFrame(root, text="P1", bg="#e8f0ff")
+    zone_p2 = tk.LabelFrame(root, text="P2", bg="#ffe8e8")
+
+    def layout_zone_frames():
+        # derive P1/P2 geometry from the pool's actual rendered width instead of
+        # a plain relwidth of the whole window, since the pool itself is already
+        # narrowed to make room for the combined-view column on the right
+        root.update_idletasks()
+        pool_x, pool_w = pool.winfo_x(), pool.winfo_width()
+        half = (pool_w - 10) // 2
+        zone_p1.place(x=pool_x, rely=0.62, width=half, relheight=0.34, y=6, height=-12)
+        zone_p2.place(x=pool_x + half + 10, rely=0.62, width=half, relheight=0.34, y=6, height=-12)
+
+    layout_zone_frames()
+
+    status_text = ("Press a button on a controller to see which card lights up." if js
+                   else "No gamepad detected yet - connect one and hit Refresh.")
+    status = tk.Label(root, text=status_text, anchor="w")
+    status.place(relx=0.0, rely=1.0, relwidth=1.0, x=10, y=-22, width=-20, height=18)
+
+    CARD_GAP = 8
+    cards = []  # dicts: index, j, frame, handle, name_var, profile_var, zone ("pool"/"P1"/"P2")
+
+    def make_card(i, j):
+        card = tk.Frame(root, bd=2, relief="raised", bg="white",
+                         highlightthickness=3, highlightbackground="white")
+
+        # the whole handle is the drag grip - keep it free of any widget that
+        # wants mouse clicks for itself (an Entry here broke dragging entirely,
+        # since it grabbed the click before the handle's own binding saw it)
+        handle = tk.Frame(card, bg="#444444", height=16)
+        handle.pack(fill="x", side="top")
+        index_label = tk.Label(handle, text=f"gamepad [{i}]", bg="#444444", fg="white",
+                                font=("Segoe UI", 7))
+        index_label.pack(side="left", padx=4)
+
+        name_var = tk.StringVar(value=f"Player {i}")
+        tk.Entry(card, textvariable=name_var, font=("Segoe UI", 9, "bold")).pack(
+            fill="x", padx=5, pady=(2, 2))
+
+        diagram_canvas = tk.Canvas(card, width=PAD_DIAGRAM_W, height=PAD_DIAGRAM_H, bg="white",
+                                    highlightthickness=0)
+        diagram_canvas.pack(pady=(0, 2))
+        diagram_ids, diagram_meta = _draw_pad_diagram(diagram_canvas, scale=PAD_DIAGRAM_SCALE)
+
+        # profile picker + a small color dot (standard=gray/custom=gold) + a tiny
+        # gear button to open the editor, all sharing one row instead of three -
+        # the dropdown already shows the exact profile name, no need to repeat it
+        profile_row = tk.Frame(card, bg="white")
+        profile_row.pack(fill="x", padx=6, pady=(0, 3))
+        tag_dot = tk.Label(profile_row, text=" ", bg="#888888", width=1)
+        tag_dot.pack(side="left", padx=(0, 4))
+        profile_var = tk.StringVar(value="standard")
+        combo = ttk.Combobox(profile_row, values=profile_names, textvariable=profile_var,
+                              state="readonly", font=("Segoe UI", 8))
+        combo.pack(side="left", fill="x", expand=True)
+
+        def update_tag(*_a):
+            tag_dot.configure(bg="#888888" if profile_var.get() == "standard" else "#b8860b")
+
+        profile_var.trace_add("write", update_tag)
+        update_tag()
+
+        info = {"index": i, "j": j, "frame": card, "handle": handle, "index_label": index_label,
+                "name_var": name_var, "profile_var": profile_var, "combo": combo,
+                "diagram_canvas": diagram_canvas, "diagram_ids": diagram_ids,
+                "diagram_meta": diagram_meta, "zone": "pool"}
+        cards.append(info)
+
+        config_btn = tk.Button(profile_row, text="⚙", font=("Segoe UI", 10), width=2)
+        config_btn.pack(side="left", padx=(3, 0))
+        config_btn.configure(command=lambda: open_profile_editor(info))
+
+        def start_drag(ev):
+            mx = ev.x_root - root.winfo_rootx()
+            my = ev.y_root - root.winfo_rooty()
+            info["drag_off"] = (mx - card.winfo_x(), my - card.winfo_y())
+            card.lift()
+
+        def do_drag(ev):
+            mx = ev.x_root - root.winfo_rootx()
+            my = ev.y_root - root.winfo_rooty()
+            ox, oy = info["drag_off"]
+            card.place(x=mx - ox, y=my - oy)
+
+        def end_drag(_ev):
+            drop_card(info)
+
+        handle.bind("<ButtonPress-1>", start_drag)
+        handle.bind("<B1-Motion>", do_drag)
+        handle.bind("<ButtonRelease-1>", end_drag)
+        return card
+
+    def zone_bbox(zone_frame):
+        return (zone_frame.winfo_x(), zone_frame.winfo_y(),
+                zone_frame.winfo_x() + zone_frame.winfo_width(),
+                zone_frame.winfo_y() + zone_frame.winfo_height())
+
+    def point_in(px, py, bbox):
+        x0, y0, x1, y1 = bbox
+        return x0 <= px <= x1 and y0 <= py <= y1
+
+    def relayout_grid(zone_frame, members):
+        # however many cards fit across the frame's CURRENT width - this is what
+        # lets the same layout work at 720p (fewer per row, more rows) and on a
+        # bigger screen (more per row) without hardcoding a column count.
+        per_row = max(1, zone_frame.winfo_width() // (CARD_W + CARD_GAP))
+        for n, c in enumerate(members):
+            col, row = n % per_row, n // per_row
+            x = zone_frame.winfo_x() + 8 + col * (CARD_W + CARD_GAP)
+            y = zone_frame.winfo_y() + 22 + row * (CARD_H + CARD_GAP)
+            c["frame"].place(x=x, y=y, width=CARD_W, height=CARD_H)
+
+    def relayout_all():
+        relayout_grid(pool, [c for c in cards if c["zone"] == "pool"])
+        relayout_grid(zone_p1, [c for c in cards if c["zone"] == "P1"])
+        relayout_grid(zone_p2, [c for c in cards if c["zone"] == "P2"])
+
+    def drop_card(info):
+        cx = info["frame"].winfo_x() + CARD_W // 2
+        cy = info["frame"].winfo_y() + CARD_H // 2
+        if point_in(cx, cy, zone_bbox(zone_p1)):
+            info["zone"] = "P1"
+        elif point_in(cx, cy, zone_bbox(zone_p2)):
+            info["zone"] = "P2"
+        else:
+            info["zone"] = "pool"
+        relayout_all()
+
+    for i, j in enumerate(js):
+        make_card(i, j)
+    root.update_idletasks()
+    relayout_all()
+
+    def on_resize(ev):
+        if ev.widget is root:
+            # the pool/P1/P2 frames use relative placement, so on a resize their
+            # own new geometry isn't final yet at this exact instant - flush it
+            # first, otherwise cards get positioned against stale frame sizes
+            # (this is what made a card overlap the P1 label when maximizing).
+            root.update_idletasks()
+            layout_zone_frames()
+            relayout_all()
+
+    root.bind("<Configure>", on_resize)
+
+    # --- live identify: flash a card's header when its physical control moves ---
+    # paused while a profile editor is open, so both stop fighting over the same
+    # pygame event queue (that dialog runs its own polling loop instead).
+    main_poll_paused = {"v": False}
+
+    # --- virtual pad state - the pads themselves are still created lazily,
+    # only once Start is pressed; vg_module (the module) was already ensured
+    # up front, right after the tkinter import above.
+
+    virtual_pads = {"P1": None, "P2": None}
+    live = {"on": False}
+
+    def unflash(info):
+        info["frame"].configure(highlightbackground="white")
+
+    def flash(info):
+        # a colored ring around the card, not a bg change - changing bg made
+        # the 3D raised border recompute its shading, which read as a little
+        # jump/shift on screen
+        info["frame"].configure(highlightbackground="#7CFC00")
+        root.after(250, lambda: unflash(info))
+
+    # Split in two so the game-input path never waits on Tkinter/Canvas drawing:
+    #   fast_tick  - every poll_ms (4ms, matching the CLI's own loop): drain
+    #                events, read every controller, apply the live merge. No
+    #                widget/canvas work happens here.
+    #   diagram_tick - every ~30ms: paints the cards using whatever fast_tick
+    #                last computed. Purely cosmetic, never touches the pads.
+    last_states = {}
+
+    def fast_tick():
+        if not main_poll_paused["v"]:
+            try:
+                for ev in pygame.event.get():
+                    if ev.type in (pygame.JOYBUTTONDOWN, pygame.JOYHATMOTION):
+                        inst = getattr(ev, "instance_id", getattr(ev, "joy", None))
+                        for c in cards:
+                            if c["j"].get_instance_id() == inst:
+                                flash(c)
+                                if not live["on"]:
+                                    status.configure(text=f" ese fue el gamepad {c['index']} MAMAAAAAA")
+
+                for c in cards:
+                    last_states[c["index"]] = _read_state(c["j"], resolve_profile(c["profile_var"].get()))
+
+                if live["on"]:
+                    for side in ("P1", "P2"):
+                        pad = virtual_pads[side]
+                        if pad is None:
+                            continue
+                        members = [c for c in cards if c["zone"] == side]
+                        if not members:
+                            pad.reset()
+                            pad.update()
+                            continue
+                        merged = _merge([last_states[c["index"]] for c in members])
+                        _apply(pad, merged, vg_module["vg"])
+            except Exception as e:
+                # most likely a gamepad got unplugged mid-tick - stop cleanly and
+                # say so, instead of silently dying and never ticking again
+                if live["on"]:
+                    toggle_live(reason=f"Stopped - a gamepad stopped responding ({e}). "
+                                        "Hit Refresh, then Go live again.")
+                else:
+                    status.configure(text=f"Gamepad read error ({e}). Hit Refresh.")
+        root.after(CONFIG["poll_ms"], fast_tick)
+
+    def _neutral_state():
+        return {"LX": 0.0, "LY": 0.0, "RX": 0.0, "RY": 0.0, "LT": 0.0, "RT": 0.0,
+                "buttons": {n: False for n in BUTTON_NAMES}, "dpad": (0, 0)}
+
+    def diagram_tick():
+        if not main_poll_paused["v"]:
+            try:
+                for c in cards:
+                    st = last_states.get(c["index"])
+                    if st is not None:
+                        _update_pad_diagram(c["diagram_canvas"], c["diagram_ids"], c["diagram_meta"], st)
+
+                for side, (cc, cids, cmeta) in combined_panels.items():
+                    members = [c for c in cards if c["zone"] == side]
+                    if members:
+                        merged = _merge([last_states[c["index"]] for c in members
+                                          if c["index"] in last_states]) or _neutral_state()
+                    else:
+                        merged = _neutral_state()
+                    _update_pad_diagram(cc, cids, cmeta, merged)
+            except Exception:
+                pass
+        root.after(30, diagram_tick)
+
+    root.after(CONFIG["poll_ms"], fast_tick)
+    root.after(30, diagram_tick)
+
+    # --- profile editor: per-gamepad window with a live tester + button mapping ---
+    def refresh_profile_choices():
+        names = ["standard"] + sorted(profiles.keys())
+        for c in cards:
+            c["combo"]["values"] = names
+
+    def open_profile_editor(target):
+        j = target["j"]
+        idx = target["index"]
+
+        win = tk.Toplevel(root)
+        win.title(f"Configure controls - gamepad [{idx}]")
+        win.geometry("580x640")
+        win.transient(root)
+        win.grab_set()
+        win.lift()
+        win.focus_force()
+
+        main_poll_paused["v"] = True
+
+        def on_close():
+            main_poll_paused["v"] = False
+            win.destroy()
+
+        win.protocol("WM_DELETE_WINDOW", on_close)
+
+        # edit the card's current custom profile if it has one, else start blank
+        current_pf = target["profile_var"].get()
+        if current_pf != "standard" and current_pf in profiles:
+            working = dict(profiles[current_pf])
+            start_name = current_pf
+        else:
+            working = {}
+            start_name = ""
+
+        tk.Label(win, text=f"{j.get_name()}  (instance {j.get_instance_id()})",
+                 font=("Segoe UI", 9, "italic")).pack(anchor="w", padx=10, pady=(10, 0))
+
+        # --- live tester ---
+        tester = tk.LabelFrame(win, text="Live test - press anything on this controller")
+        tester.pack(fill="x", padx=10, pady=10)
+
+        n_bt = j.get_numbuttons()
+        n_ax = j.get_numaxes()
+
+        btn_row = tk.Frame(tester)
+        btn_row.pack(fill="x", padx=6, pady=4)
+        tk.Label(btn_row, text="Buttons:", width=8, anchor="w").pack(side="left")
+        btn_labels = []
+        for b in range(n_bt):
+            lbl = tk.Label(btn_row, text=str(b), width=3, relief="ridge", bg="white")
+            lbl.pack(side="left", padx=1)
+            btn_labels.append(lbl)
+
+        axis_row = tk.Frame(tester)
+        axis_row.pack(fill="x", padx=6, pady=4)
+        tk.Label(axis_row, text="Axes:", width=8, anchor="w").pack(side="left")
+        axis_vars = [tk.StringVar(value="0.00") for _ in range(n_ax)]
+        for a in range(n_ax):
+            tk.Label(axis_row, textvariable=axis_vars[a], width=6, relief="sunken",
+                     bg="#f4f4f4").pack(side="left", padx=2)
+
+        dpad_row = tk.Frame(tester)
+        dpad_row.pack(fill="x", padx=6, pady=4)
+        tk.Label(dpad_row, text="D-pad:", width=8, anchor="w").pack(side="left")
+        dpad_var = tk.StringVar(value="(0, 0)")
+        tk.Label(dpad_row, textvariable=dpad_var, width=8, relief="sunken",
+                 bg="#f4f4f4").pack(side="left", padx=2)
+
+        # --- mapping table ---
+        mapping_frame = tk.LabelFrame(win, text="Button mapping")
+        mapping_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        row_widgets = {}   # key -> (value_var, set_button)
+        waiting = {"key": None}
+
+        def format_spec(spec):
+            return "(not set)" if spec is None else f"{spec['type']} {spec['index']}"
+
+        def do_set(key):
+            val_var, set_btn = row_widgets[key]
+            if waiting["key"] == key:
+                waiting["key"] = None
+                set_btn.configure(text="Set")
+                val_var.set(format_spec(working.get(key)))
+                return
+            if waiting["key"] is not None:
+                pv, pb = row_widgets[waiting["key"]]
+                pb.configure(text="Set")
+                pv.set(format_spec(working.get(waiting["key"])))
+            waiting["key"] = key
+            set_btn.configure(text="Cancel")
+            val_var.set("press now...")
+
+        def do_clear(key):
+            working.pop(key, None)
+            row_widgets[key][0].set(format_spec(None))
+
+        def make_row(parent, key, required):
+            row = tk.Frame(parent)
+            row.pack(fill="x", padx=6, pady=2)
+            text = f"{FRIENDLY_NAME[key]} [{key}]" + ("" if required else "  (optional)")
+            tk.Label(row, text=text, width=34, anchor="w").pack(side="left")
+            val_var = tk.StringVar(value=format_spec(working.get(key)))
+            tk.Label(row, textvariable=val_var, width=12, relief="sunken",
+                     bg="#f4f4f4", anchor="w").pack(side="left", padx=4)
+            set_btn = tk.Button(row, text="Set", width=6, command=lambda: do_set(key))
+            set_btn.pack(side="left", padx=2)
+            tk.Button(row, text="Clear", width=6, command=lambda: do_clear(key)).pack(
+                side="left", padx=2)
+            row_widgets[key] = (val_var, set_btn)
+
+        for key in REQUIRED_BUTTONS:
+            make_row(mapping_frame, key, True)
+        tk.Frame(mapping_frame, height=1, bg="#cccccc").pack(fill="x", pady=4)
+        for key in OPTIONAL_BUTTONS:
+            make_row(mapping_frame, key, False)
+
+        # --- save area ---
+        save_row = tk.Frame(win)
+        save_row.pack(fill="x", padx=10, pady=(0, 4))
+        tk.Label(save_row, text="Profile name:").pack(side="left")
+        name_var = tk.StringVar(value=start_name)
+        tk.Entry(save_row, textvariable=name_var).pack(side="left", fill="x", expand=True, padx=6)
+
+        editor_status = tk.StringVar(value="")
+        tk.Label(win, textvariable=editor_status, fg="#888888", anchor="w").pack(
+            fill="x", padx=10)
+
+        def do_save():
+            name = name_var.get().strip()
+            if not name:
+                editor_status.set("Type a profile name first.")
+                return
+            missing = [k for k in REQUIRED_BUTTONS if k not in working]
+            profiles[name] = dict(working)
+            _save_profiles(profiles)
+            refresh_profile_choices()
+            target["profile_var"].set(name)
+            if missing:
+                editor_status.set(f"Saved '{name}' - heads up, still missing: {missing}")
+            else:
+                editor_status.set(f"Saved '{name}'.")
+
+        def do_delete():
+            name = name_var.get().strip()
+            if not name or name not in profiles:
+                editor_status.set(f"'{name}' isn't a saved profile - nothing to delete.")
+                return
+            if not messagebox.askyesno("Delete profile", f"Delete profile '{name}'? "
+                                        "This can't be undone.", parent=win):
+                return
+            del profiles[name]
+            _save_profiles(profiles)
+            refresh_profile_choices()
+            # any card that was using this profile falls back to standard
+            for c in cards:
+                if c["profile_var"].get() == name:
+                    c["profile_var"].set("standard")
+            on_close()
+
+        btns_row = tk.Frame(win)
+        btns_row.pack(fill="x", padx=10, pady=(0, 10))
+        tk.Button(btns_row, text="Save profile", command=do_save).pack(side="left")
+        tk.Button(btns_row, text="Delete profile", fg="#a00000", command=do_delete).pack(
+            side="left", padx=6)
+        tk.Button(btns_row, text="Close", command=on_close).pack(side="right")
+
+        # --- live polling for this dialog only, while it's open ---
+        def editor_poll():
+            if not win.winfo_exists():
+                return
+            for ev in pygame.event.get():
+                eid = getattr(ev, "instance_id", getattr(ev, "joy", None))
+                if eid != j.get_instance_id() or waiting["key"] is None:
+                    continue
+                key = waiting["key"]
+                if ev.type == pygame.JOYBUTTONDOWN:
+                    working[key] = {"type": "button", "index": ev.button}
+                elif ev.type == pygame.JOYAXISMOTION and abs(ev.value) > 0.6:
+                    working[key] = {"type": "axis", "index": ev.axis}
+                else:
+                    continue
+                row_widgets[key][0].set(format_spec(working[key]))
+                row_widgets[key][1].configure(text="Set")
+                waiting["key"] = None
+
+            pygame.event.pump()
+            for b, lbl in enumerate(btn_labels):
+                lbl.configure(bg="#7CFC00" if j.get_button(b) else "white")
+            for a in range(n_ax):
+                axis_vars[a].set(f"{j.get_axis(a):.2f}")
+            if j.get_numhats() > 0:
+                dpad_var.set(str(j.get_hat(0)))
+
+            win.after(30, editor_poll)
+
+        editor_poll()
+
+    # --- go live: create the virtual pad(s) lazily and start/stop sending input,
+    # without ever closing this window. Dragging cards between sides while live
+    # remaps on the fly - the poll loop above just reads whoever is in each zone
+    # on every tick, there's no separate "commit" step.
+    def ensure_pad(side):
+        if virtual_pads[side] is not None:
+            return virtual_pads[side]
+        if vg_module["vg"] is None:
+            vg_module["vg"] = _ensure_package("vgamepad")
+        try:
+            virtual_pads[side] = vg_module["vg"].VX360Gamepad()
+        except Exception as e:
+            messagebox.showerror(
+                "Couldn't create virtual gamepad",
+                f"{e}\n\nThis usually means the ViGEmBus driver isn't installed yet, or a "
+                "reboot is pending after installing it.", parent=root)
+            return None
+        return virtual_pads[side]
+
+    def release_pad(side):
+        pad = virtual_pads[side]
+        if pad is not None:
+            pad.reset()
+            pad.update()
+
+    def save_session():
+        session = {"virtual_pads": []}
+        for side_name in ("P1", "P2"):
+            members = [c for c in cards if c["zone"] == side_name]
+            if not members:
+                continue
+            session["virtual_pads"].append({
+                "name": side_name, "mode": "merge", "switch_button": "BACK",
+                "sources": [{"index": c["index"],
+                             "profile": None if c["profile_var"].get() == "standard"
+                             else c["profile_var"].get(),
+                             "label": c["name_var"].get().strip() or None}
+                            for c in members],
+            })
+        with open(SESSION_PATH, "w", encoding="utf-8") as f:
+            json.dump(session, f, indent=2, ensure_ascii=False)
+
+    def toggle_live(reason=None):
+        if live["on"]:
+            live["on"] = False
+            release_pad("P1")
+            release_pad("P2")
+            live_btn.configure(text="Start", bg="#c8f7c8")
+            refresh_btn.configure(state="normal")
+            status.configure(text=reason or "Stopped. Drag cards freely, then go live again when ready.")
+            return
+
+        p1 = [c for c in cards if c["zone"] == "P1"]
+        p2 = [c for c in cards if c["zone"] == "P2"]
+        if not p1 and not p2:
+            status.configure(text="Drag at least one gamepad into P1 or P2 first.")
+            return
+        if (p1 and ensure_pad("P1") is None) or (p2 and ensure_pad("P2") is None):
+            return
+
+        save_session()
+        live["on"] = True
+        live_btn.configure(text="Stop", bg="#ffb3b3")
+        refresh_btn.configure(state="disabled")
+        status.configure(text="Live - sending input to the virtual pad(s). Drag cards to remap on the fly.")
+
+    live_btn.configure(command=toggle_live)
+
+    def refresh_gamepads():
+        if live["on"]:
+            return  # button is disabled while live anyway, this is just a guard
+        new_js = _gamepads()
+        kept_instances = set()
+        for i, j in enumerate(new_js):
+            inst = j.get_instance_id()
+            kept_instances.add(inst)
+            existing = next((c for c in cards if c["j"].get_instance_id() == inst), None)
+            if existing is not None:
+                existing["index"] = i
+                existing["j"] = j
+                existing["index_label"].configure(text=f"gamepad [{i}]")
+            else:
+                make_card(i, j)
+        for c in list(cards):
+            if c["j"].get_instance_id() not in kept_instances:
+                c["frame"].destroy()
+                cards.remove(c)
+        root.update_idletasks()
+        relayout_all()
+        status.configure(text=f"Refreshed - {len(cards)} gamepad(s) detected.")
+
+    refresh_btn.configure(command=refresh_gamepads)
+
+    def open_latency_test():
+        if not cards:
+            status.configure(text="No gamepad to test - connect one first.")
+            return
+
+        win = tk.Toplevel(root)
+        win.title("Latency test")
+        win.geometry("380x190")
+        win.resizable(False, False)
+        win.transient(root)
+        win.grab_set()
+        win.lift()
+        win.focus_force()
+
+        main_poll_paused["v"] = True
+
+        tk.Label(win, text="Gamepad:").place(x=10, y=12)
+        names = [f"[{c['index']}] {c['name_var'].get()}" for c in cards]
+        sel_var = tk.StringVar(value=names[0])
+        combo = ttk.Combobox(win, values=names, textvariable=sel_var, state="readonly",
+                              font=("Segoe UI", 9))
+        combo.current(0)
+        combo.place(x=80, y=10, width=280)
+
+        tk.Label(win, text="Press any button on it. This times OUR pipeline only (read +",
+                 font=("Segoe UI", 8), fg="#888888").place(x=10, y=40)
+        tk.Label(win, text="write) - not USB, not Parsec, not the game itself.",
+                 font=("Segoe UI", 8), fg="#888888").place(x=10, y=54)
+
+        last_var = tk.StringVar(value="Last press: -")
+        tk.Label(win, textvariable=last_var, font=("Consolas", 10)).place(x=10, y=84)
+
+        avg_var = tk.StringVar(value="No presses yet.")
+        tk.Label(win, textvariable=avg_var, font=("Consolas", 10)).place(x=10, y=110)
+
+        tk.Label(win, text="(for reference: one frame at 60fps = 16.6 ms)",
+                 font=("Segoe UI", 8), fg="#888888").place(x=10, y=150)
+
+        test_pad = None
+        try:
+            vg = vg_module["vg"]
+            test_pad = vg.VX360Gamepad()
+            A = vg.XUSB_BUTTON.XUSB_GAMEPAD_A
+        except Exception as e:
+            avg_var.set(f"Couldn't create a test pad: {e}")
+
+        samples = []
+        closed = {"v": False}
+
+        def on_close():
+            closed["v"] = True
+            main_poll_paused["v"] = False
+            win.destroy()
+
+        win.protocol("WM_DELETE_WINDOW", on_close)
+
+        last_check = {"t": time.perf_counter()}
+
+        def tick():
+            if closed["v"]:
+                return
+            idx = combo.current()
+            j = cards[idx]["j"] if 0 <= idx < len(cards) else None
+
+            now = time.perf_counter()
+            wait_ms = (now - last_check["t"]) * 1000.0
+            last_check["t"] = now
+
+            if j is not None:
+                for ev in pygame.event.get():
+                    eid = getattr(ev, "instance_id", getattr(ev, "joy", None))
+                    if eid != j.get_instance_id() or ev.type != pygame.JOYBUTTONDOWN:
+                        continue
+                    if test_pad is not None:
+                        t0 = time.perf_counter()
+                        test_pad.press_button(button=A)
+                        test_pad.update()
+                        test_pad.reset()
+                        test_pad.update()
+                        convert_ms = (time.perf_counter() - t0) * 1000.0
+                        total_ms = wait_ms + convert_ms
+                        samples.append(total_ms)
+                        last_var.set(f"Last press: wait {wait_ms:5.2f}ms + convert "
+                                      f"{convert_ms:5.2f}ms = {total_ms:6.2f}ms")
+                        n = len(samples)
+                        avg_var.set(f"{n} presses - avg {sum(samples) / n:.2f}ms, "
+                                     f"max {max(samples):.2f}ms")
+            win.after(CONFIG["poll_ms"], tick)
+
+        tick()
+
+    latency_btn.configure(command=open_latency_test)
+
+    def on_root_close():
+        if live["on"]:
+            release_pad("P1")
+            release_pad("P2")
+        root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", on_root_close)
+    root.mainloop()
+
+
 # ============================ RUNTIME ============================
 
 def _clamp(v):
@@ -654,6 +1474,8 @@ def main():
         cmd_profile_list()
     elif args[0] == "--setup":
         cmd_setup()
+    elif args[0] == "--gui":
+        cmd_gui()
     else:
         print(__doc__)
 
