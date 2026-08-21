@@ -21,18 +21,22 @@ vgamepad (ViGEmBus) to create the virtual one(s). No vJoy involved.
   installer from python.org; if it's missing, reinstall Python with the
   default options (don't deselect it).
 
-If any of this is missing when you run the script, it tells you exactly
-what's missing and how to fix it - it doesn't fail silently.
+If any of the required ones is missing when you run the script, it tells you
+exactly what's missing and how to fix it - it doesn't fail silently.
 
-## Quick start (no Python yet?)
+## Quick start (double-click, no console needed)
 
-Double-click **`setup.bat`**. It checks for a working Python 3.9+ (the
-Microsoft Store's fake `python` placeholder doesn't count), installs a real
-one via `winget` if needed, and then launches the GUI automatically. If
-`winget` isn't available or the install fails, it opens the python.org
-download page for you instead and tells you what to do - it won't leave you
-stuck either way. Once Python is in place, `controller_fusion.py` installs
-its own remaining dependencies (see Requirements above) on its own.
+- **First time, or not sure if Python is installed?** Double-click
+  **`setup.bat`**. It checks for a working Python 3.9+ (the Microsoft Store's
+  fake `python` placeholder doesn't count), installs a real one via `winget`
+  if needed, and then launches the GUI automatically. If `winget` isn't
+  available or the install fails, it opens the python.org download page for
+  you instead and tells you what to do - it won't leave you stuck either way.
+- **Already set up, just want to play?** Double-click **`play.bat`** - skips
+  the checks and goes straight to `python controller_fusion.py --gui`.
+
+Either way, once Python is in place, `controller_fusion.py` installs its own
+remaining dependencies (see Requirements above) on its own.
 
 ## Quick start (GUI)
 

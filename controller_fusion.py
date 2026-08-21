@@ -66,6 +66,23 @@ def _ensure_package(import_name, pip_name=None):
         sys.exit(1)
 
 
+def _try_ensure_optional(import_name, pip_name=None):
+    """Like _ensure_package, but for purely cosmetic dependencies: never exits
+    the program. Any failure (no internet, install error, whatever) just
+    returns None so the caller can fall back to something built-in instead."""
+    pip_name = pip_name or import_name
+    try:
+        return __import__(import_name)
+    except ImportError:
+        pass
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", pip_name],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return __import__(import_name)
+    except Exception:
+        return None
+
+
 pygame = _ensure_package("pygame")
 
 
@@ -460,22 +477,21 @@ def _draw_pad_diagram(canvas, scale=1.0):
     """Draws a small generic gamepad schematic on `canvas` (not brand-accurate, just
     enough to tell buttons apart, with everything spaced so labels never touch a
     neighboring shape) and returns ({logical_name: canvas_item_id}, {name: (cx, cy,
-    move_radius)}) - the second dict is only for the stick dots, so the caller can
-    reposition them live with canvas.coords() instead of just recoloring them.
-    Coordinates below are the base (scale=1.0) layout; everything is multiplied by
-    `scale` so the same drawing can be shown bigger without redoing the numbers.
-    The left stick gets an actual moving dot (reuses the gap between the D-pad and
-    the face buttons, no extra room needed); the right stick only gets a plain
-    click (R3) indicator for now - left was asked for as the priority, right can
-    follow later using the same technique if it turns out to matter."""
+    move_radius, dot_radius)}) - the second dict is only for the stick dots (LS/RS),
+    so the caller can reposition them live with canvas.coords() instead of just
+    recoloring them. Coordinates below are the base (scale=1.0) layout; everything
+    is multiplied by `scale` so the same drawing can be shown bigger without
+    redoing the numbers. Both sticks get a moving dot; the left one sits in the
+    gap between the D-pad and face buttons, the right one is smaller since it has
+    less free space to work with, squeezed just past the face buttons."""
     def s(v):
         return v * scale
 
     def sf(pt):
         return max(6, round(pt * scale))
 
-    OFF = "#dddddd"
-    OUT = "#999999"
+    OFF = "#e4e7ec"
+    OUT = "#aab0bc"
     ids = {}
     meta = {}
 
@@ -499,7 +515,7 @@ def _draw_pad_diagram(canvas, scale=1.0):
     ids["dpad_down"] = canvas.create_rectangle(s(26), s(46), s(38), s(58), fill=OFF, outline=OUT)
     ids["dpad_left"] = canvas.create_rectangle(s(14), s(34), s(26), s(46), fill=OFF, outline=OUT)
     ids["dpad_right"] = canvas.create_rectangle(s(38), s(34), s(50), s(46), fill=OFF, outline=OUT)
-    canvas.create_rectangle(s(26), s(34), s(38), s(46), fill="#eeeeee", outline=OUT)
+    canvas.create_rectangle(s(26), s(34), s(38), s(46), fill="#f0f2f5", outline=OUT)
 
     ids["Y"] = canvas.create_oval(s(124), s(22), s(136), s(34), fill=OFF, outline=OUT)
     canvas.create_text(s(130), s(28), text="Y", font=("Segoe UI", sf(6)))
@@ -519,8 +535,14 @@ def _draw_pad_diagram(canvas, scale=1.0):
                                     fill=OFF, outline=OUT)
     meta["LS"] = (s(lcx), s(lcy), s(lr - ldot), s(ldot))
 
-    # Right stick: click only for now (R3), no dot movement - see docstring.
-    ids["RS"] = canvas.create_oval(s(156), s(34), s(168), s(46), fill=OFF, outline=OUT)
+    # Right stick: same idea as the left one, just smaller - there's less room
+    # to the right of the face buttons than there was in the D-pad gap.
+    rcx, rcy, rr, rdot = 162, 40, 10, 3
+    canvas.create_rectangle(s(rcx - rr), s(rcy - rr), s(rcx + rr), s(rcy + rr),
+                             fill="#f4f4f4", outline=OUT)
+    ids["RS"] = canvas.create_oval(s(rcx - rdot), s(rcy - rdot), s(rcx + rdot), s(rcy + rdot),
+                                    fill=OFF, outline=OUT)
+    meta["RS"] = (s(rcx), s(rcy), s(rr - rdot), s(rdot))
 
     return ids, meta
 
@@ -528,8 +550,8 @@ def _draw_pad_diagram(canvas, scale=1.0):
 def _update_pad_diagram(canvas, ids, meta, st):
     """Colors/moves a diagram drawn by _draw_pad_diagram according to a _read_state()
     result. `meta` positions the stick dot(s) - see _draw_pad_diagram."""
-    ON = "#7CFC00"
-    OFF = "#dddddd"
+    ON = "#3fae5c"
+    OFF = "#e4e7ec"
     for name in ("A", "B", "X", "Y", "LB", "RB", "BACK", "START", "LS", "RS"):
         canvas.itemconfig(ids[name], fill=ON if st["buttons"].get(name) else OFF)
     canvas.itemconfig(ids["LT"], fill=ON if st["LT"] > 0.5 else OFF)
@@ -540,11 +562,11 @@ def _update_pad_diagram(canvas, ids, meta, st):
     canvas.itemconfig(ids["dpad_left"], fill=ON if dx < 0 else OFF)
     canvas.itemconfig(ids["dpad_right"], fill=ON if dx > 0 else OFF)
 
-    cx, cy, r, dot_r = meta["LS"]
-    lx = max(-1.0, min(1.0, st["LX"]))
-    ly = max(-1.0, min(1.0, st["LY"]))
-    px, py = cx + lx * r, cy + ly * r
-    canvas.coords(ids["LS"], px - dot_r, py - dot_r, px + dot_r, py + dot_r)
+    for name, keys in (("LS", ("LX", "LY")), ("RS", ("RX", "RY"))):
+        cx, cy, r, dot_r = meta[name]
+        vx, vy = _clamp(st[keys[0]]), _clamp(st[keys[1]])
+        px, py = cx + vx * r, cy + vy * r
+        canvas.coords(ids[name], px - dot_r, py - dot_r, px + dot_r, py + dot_r)
 
 
 def cmd_gui():
@@ -590,19 +612,51 @@ def cmd_gui():
     root.minsize(700, 560)
     root.resizable(True, True)
 
+    # Reverted: sv-ttk's button sizing didn't respect the fixed-pixel header
+    # layout (Latency test/Refresh/Start overlapped) and I can't iterate on
+    # pixel fixes without seeing it render. Back to the native Windows theme,
+    # which was confirmed working. _try_ensure_optional is still here if we
+    # want to revisit this later with a less fragile (non-fixed-pixel) layout.
+    style = ttk.Style()
+    for theme in ("vista", "xpnative", "clam"):
+        try:
+            style.theme_use(theme)
+            break
+        except tk.TclError:
+            continue
+
+    BG = "#f3f5f8"
+    CARD_BG = "#ffffff"
+    HEADER_BG = "#33384a"
+    BORDER = "#c7ccd6"
+    P1_BG = "#eaf1ff"
+    P2_BG = "#fff1ef"
+    ACCENT_OK = "#dff5e6"
+    ACCENT_STOP = "#fbe1e0"
+
+    root.configure(bg=BG)
+
     # Toggle, not a one-shot Start: flips sending input to the virtual pad(s) on
     # and off without ever closing this window. Off by default so dragging cards
     # around while setting up teams can't accidentally send input mid-shuffle.
-    live_btn = tk.Button(root, text="Start", bg="#c8f7c8")
+    live_btn = tk.Button(root, text="Start", bg=ACCENT_OK, relief="flat", bd=1)
     live_btn.place(relx=1.0, rely=0.0, x=-100, y=6, width=90, height=24)
+
+    # ttk.Button gets native hover for free from the theme; this one stayed a
+    # plain tk.Button so it can flip green/red, which costs it that hover -
+    # add it back by hand so it doesn't feel dead next to its ttk neighbors.
+    live_btn.bind("<Enter>", lambda _e: live_btn.configure(
+        bg="#f6b8b5" if live["on"] else "#b8e6c8"))
+    live_btn.bind("<Leave>", lambda _e: live_btn.configure(
+        bg=ACCENT_STOP if live["on"] else ACCENT_OK))
 
     # Re-scans connected gamepads. Only meant to be used while stopped (disabled
     # while live) - re-detecting hardware mid-merge is what we're avoiding here.
-    refresh_btn = tk.Button(root, text="Refresh")
+    refresh_btn = ttk.Button(root, text="Refresh")
     refresh_btn.place(relx=1.0, rely=0.0, x=-176, y=6, width=70, height=24)
 
     # Opens the latency test in its own window - see open_latency_test below.
-    latency_btn = tk.Button(root, text="Latency test")
+    latency_btn = ttk.Button(root, text="Latency test")
     latency_btn.place(relx=1.0, rely=0.0, x=-266, y=6, width=84, height=24)
 
     # Narrow strip on the right: what each virtual pad actually receives, merged
@@ -611,16 +665,17 @@ def cmd_gui():
     # into the pool's height budget (width had more slack than height at 720p).
     RIGHT_COL_W = 150
 
-    combined_col = tk.LabelFrame(root, text="Combined")
+    combined_col = tk.LabelFrame(root, text="Combined", bg=BG)
     combined_col.place(relx=1.0, rely=0.0, x=-(RIGHT_COL_W + 10), y=30,
                         width=RIGHT_COL_W, relheight=1.0, height=-52)
 
     COMBINED_SCALE = 0.7
     combined_panels = {}
     for n, side in enumerate(("P1", "P2")):
-        tk.Label(combined_col, text=side, font=("Segoe UI", 9, "bold")).place(x=6, y=6 + n * 90)
+        tk.Label(combined_col, text=side, font=("Segoe UI", 9, "bold"), bg=BG).place(
+            x=6, y=6 + n * 90)
         cc = tk.Canvas(combined_col, width=round(176 * COMBINED_SCALE), height=round(62 * COMBINED_SCALE),
-                       bg="white", highlightthickness=1, highlightbackground="#999999")
+                       bg=CARD_BG, highlightthickness=1, highlightbackground=BORDER)
         cc.place(x=6, y=22 + n * 90)
         cids, cmeta = _draw_pad_diagram(cc, scale=COMBINED_SCALE)
         combined_panels[side] = (cc, cids, cmeta)
@@ -630,12 +685,42 @@ def cmd_gui():
     # Pool gets the most room since worst case (extra/spare controllers waiting
     # to rotate in) everyone could be sitting there unassigned at once. Width is
     # trimmed by the combined-view column above.
-    pool = tk.LabelFrame(root, text="Detected gamepads - drag a card by its dark header")
+    pool = tk.LabelFrame(root, text="Detected gamepads - drag a card by its dark header", bg=BG)
     pool.place(relx=0.0, rely=0.0, relwidth=1.0, relheight=0.62, x=10, y=30,
                width=-(30 + RIGHT_COL_W), height=-36)
 
-    zone_p1 = tk.LabelFrame(root, text="P1", bg="#e8f0ff")
-    zone_p2 = tk.LabelFrame(root, text="P2", bg="#ffe8e8")
+    # Scroll for the pool only - P1/P2 don't need it (a handful of players per
+    # side always fits), but "everyone still waiting to be assigned" could be
+    # 6-8 cards at once, more rows than fit on a 720p screen. Cards that scroll
+    # out of view are place_forget()'d, not just visually clipped - they're
+    # still full root-level children (same as everything else), so dragging
+    # and drop-zone detection don't need to change at all.
+    pool_scroll = {"row": 0}
+
+    def scroll_pool(delta):
+        pool_scroll["row"] = max(0, pool_scroll["row"] + delta)
+        relayout_all()
+
+    pool_up_btn = ttk.Button(pool, text="▲", width=2, command=lambda: scroll_pool(-1))
+    pool_up_btn.place(relx=1.0, x=-46, y=2)
+    pool_down_btn = ttk.Button(pool, text="▼", width=2, command=lambda: scroll_pool(1))
+    pool_down_btn.place(relx=1.0, x=-24, y=2)
+
+    def _on_global_wheel(ev):
+        # cards are siblings of `pool` (children of root), not descendants of
+        # it, so binding the wheel on `pool` alone only fires when the cursor
+        # is over its bare background - which cards cover almost entirely.
+        # Check screen position instead of widget ancestry so it works no
+        # matter what's directly under the cursor.
+        px0, py0 = pool.winfo_rootx(), pool.winfo_rooty()
+        px1, py1 = px0 + pool.winfo_width(), py0 + pool.winfo_height()
+        if px0 <= ev.x_root <= px1 and py0 <= ev.y_root <= py1:
+            scroll_pool(-1 if ev.delta > 0 else 1)
+
+    root.bind_all("<MouseWheel>", _on_global_wheel)
+
+    zone_p1 = tk.LabelFrame(root, text="P1", bg=P1_BG)
+    zone_p2 = tk.LabelFrame(root, text="P2", bg=P2_BG)
 
     def layout_zone_frames():
         # derive P1/P2 geometry from the pool's actual rendered width instead of
@@ -651,22 +736,22 @@ def cmd_gui():
 
     status_text = ("Press a button on a controller to see which card lights up." if js
                    else "No gamepad detected yet - connect one and hit Refresh.")
-    status = tk.Label(root, text=status_text, anchor="w")
+    status = tk.Label(root, text=status_text, anchor="w", bg=BG)
     status.place(relx=0.0, rely=1.0, relwidth=1.0, x=10, y=-22, width=-20, height=18)
 
     CARD_GAP = 8
     cards = []  # dicts: index, j, frame, handle, name_var, profile_var, zone ("pool"/"P1"/"P2")
 
     def make_card(i, j):
-        card = tk.Frame(root, bd=2, relief="raised", bg="white",
-                         highlightthickness=3, highlightbackground="white")
+        card = tk.Frame(root, bd=2, relief="raised", bg=CARD_BG,
+                         highlightthickness=3, highlightbackground=BORDER)
 
         # the whole handle is the drag grip - keep it free of any widget that
         # wants mouse clicks for itself (an Entry here broke dragging entirely,
         # since it grabbed the click before the handle's own binding saw it)
-        handle = tk.Frame(card, bg="#444444", height=16)
+        handle = tk.Frame(card, bg=HEADER_BG, height=16)
         handle.pack(fill="x", side="top")
-        index_label = tk.Label(handle, text=f"gamepad [{i}]", bg="#444444", fg="white",
+        index_label = tk.Label(handle, text=f"gamepad [{i}]", bg=HEADER_BG, fg="white",
                                 font=("Segoe UI", 7))
         index_label.pack(side="left", padx=4)
 
@@ -674,7 +759,7 @@ def cmd_gui():
         tk.Entry(card, textvariable=name_var, font=("Segoe UI", 9, "bold")).pack(
             fill="x", padx=5, pady=(2, 2))
 
-        diagram_canvas = tk.Canvas(card, width=PAD_DIAGRAM_W, height=PAD_DIAGRAM_H, bg="white",
+        diagram_canvas = tk.Canvas(card, width=PAD_DIAGRAM_W, height=PAD_DIAGRAM_H, bg=CARD_BG,
                                     highlightthickness=0)
         diagram_canvas.pack(pady=(0, 2))
         diagram_ids, diagram_meta = _draw_pad_diagram(diagram_canvas, scale=PAD_DIAGRAM_SCALE)
@@ -682,7 +767,7 @@ def cmd_gui():
         # profile picker + a small color dot (standard=gray/custom=gold) + a tiny
         # gear button to open the editor, all sharing one row instead of three -
         # the dropdown already shows the exact profile name, no need to repeat it
-        profile_row = tk.Frame(card, bg="white")
+        profile_row = tk.Frame(card, bg=CARD_BG)
         profile_row.pack(fill="x", padx=6, pady=(0, 3))
         tag_dot = tk.Label(profile_row, text=" ", bg="#888888", width=1)
         tag_dot.pack(side="left", padx=(0, 4))
@@ -703,7 +788,7 @@ def cmd_gui():
                 "diagram_meta": diagram_meta, "zone": "pool"}
         cards.append(info)
 
-        config_btn = tk.Button(profile_row, text="⚙", font=("Segoe UI", 10), width=2)
+        config_btn = ttk.Button(profile_row, text="⚙", width=2)
         config_btn.pack(side="left", padx=(3, 0))
         config_btn.configure(command=lambda: open_profile_editor(info))
 
@@ -747,8 +832,32 @@ def cmd_gui():
             y = zone_frame.winfo_y() + 22 + row * (CARD_H + CARD_GAP)
             c["frame"].place(x=x, y=y, width=CARD_W, height=CARD_H)
 
+    def relayout_pool_scrollable():
+        members = [c for c in cards if c["zone"] == "pool"]
+        per_row = max(1, pool.winfo_width() // (CARD_W + CARD_GAP))
+        visible_rows = max(1, (pool.winfo_height() - 22) // (CARD_H + CARD_GAP))
+        total_rows = max(1, -(-len(members) // per_row))  # ceil division
+
+        pool_scroll["row"] = max(0, min(pool_scroll["row"], max(0, total_rows - visible_rows)))
+        top_row = pool_scroll["row"]
+
+        needs_scroll = total_rows > visible_rows
+        pool_up_btn.place(relx=1.0, x=-46, y=2) if needs_scroll else pool_up_btn.place_forget()
+        pool_down_btn.place(relx=1.0, x=-24, y=2) if needs_scroll else pool_down_btn.place_forget()
+        pool_up_btn.configure(state="normal" if top_row > 0 else "disabled")
+        pool_down_btn.configure(state="normal" if top_row < total_rows - visible_rows else "disabled")
+
+        for n, c in enumerate(members):
+            col, row = n % per_row, n // per_row
+            if row < top_row or row >= top_row + visible_rows:
+                c["frame"].place_forget()
+                continue
+            x = pool.winfo_x() + 8 + col * (CARD_W + CARD_GAP)
+            y = pool.winfo_y() + 22 + (row - top_row) * (CARD_H + CARD_GAP)
+            c["frame"].place(x=x, y=y, width=CARD_W, height=CARD_H)
+
     def relayout_all():
-        relayout_grid(pool, [c for c in cards if c["zone"] == "pool"])
+        relayout_pool_scrollable()
         relayout_grid(zone_p1, [c for c in cards if c["zone"] == "P1"])
         relayout_grid(zone_p2, [c for c in cards if c["zone"] == "P2"])
 
@@ -793,13 +902,13 @@ def cmd_gui():
     live = {"on": False}
 
     def unflash(info):
-        info["frame"].configure(highlightbackground="white")
+        info["frame"].configure(highlightbackground=BORDER)
 
     def flash(info):
         # a colored ring around the card, not a bg change - changing bg made
         # the 3D raised border recompute its shading, which read as a little
         # jump/shift on screen
-        info["frame"].configure(highlightbackground="#7CFC00")
+        info["frame"].configure(highlightbackground="#3fae5c")
         root.after(250, lambda: unflash(info))
 
     # Split in two so the game-input path never waits on Tkinter/Canvas drawing:
@@ -924,7 +1033,7 @@ def cmd_gui():
         tk.Label(btn_row, text="Buttons:", width=8, anchor="w").pack(side="left")
         btn_labels = []
         for b in range(n_bt):
-            lbl = tk.Label(btn_row, text=str(b), width=3, relief="ridge", bg="white")
+            lbl = tk.Label(btn_row, text=str(b), width=3, relief="ridge", bg=CARD_BG)
             lbl.pack(side="left", padx=1)
             btn_labels.append(lbl)
 
@@ -1063,7 +1172,7 @@ def cmd_gui():
 
             pygame.event.pump()
             for b, lbl in enumerate(btn_labels):
-                lbl.configure(bg="#7CFC00" if j.get_button(b) else "white")
+                lbl.configure(bg="#3fae5c" if j.get_button(b) else CARD_BG)
             for a in range(n_ax):
                 axis_vars[a].set(f"{j.get_axis(a):.2f}")
             if j.get_numhats() > 0:
@@ -1095,8 +1204,18 @@ def cmd_gui():
     def release_pad(side):
         pad = virtual_pads[side]
         if pad is not None:
-            pad.reset()
-            pad.update()
+            try:
+                pad.reset()
+                pad.update()
+            except Exception:
+                pass
+            # drop our reference and clear the slot - vgamepad unplugs the
+            # virtual device from its own __del__ once nothing references it
+            # anymore, so joy.cpl actually goes back to showing nothing on
+            # Stop instead of leaving an idle-but-still-connected pad behind
+            # (which was still eating an XInput slot - the exact thing we've
+            # been trying to avoid this whole project).
+            virtual_pads[side] = None
 
     def save_session():
         session = {"virtual_pads": []}
@@ -1120,7 +1239,7 @@ def cmd_gui():
             live["on"] = False
             release_pad("P1")
             release_pad("P2")
-            live_btn.configure(text="Start", bg="#c8f7c8")
+            live_btn.configure(text="Start", bg=ACCENT_OK)
             refresh_btn.configure(state="normal")
             status.configure(text=reason or "Stopped. Drag cards freely, then go live again when ready.")
             return
@@ -1135,7 +1254,7 @@ def cmd_gui():
 
         save_session()
         live["on"] = True
-        live_btn.configure(text="Stop", bg="#ffb3b3")
+        live_btn.configure(text="Stop", bg=ACCENT_STOP)
         refresh_btn.configure(state="disabled")
         status.configure(text="Live - sending input to the virtual pad(s). Drag cards to remap on the fly.")
 
@@ -1173,7 +1292,7 @@ def cmd_gui():
 
         win = tk.Toplevel(root)
         win.title("Latency test")
-        win.geometry("380x190")
+        win.geometry("400x205")
         win.resizable(False, False)
         win.transient(root)
         win.grab_set()
@@ -1190,19 +1309,24 @@ def cmd_gui():
         combo.current(0)
         combo.place(x=80, y=10, width=280)
 
-        tk.Label(win, text="Press any button on it. This times OUR pipeline only (read +",
-                 font=("Segoe UI", 8), fg="#888888").place(x=10, y=40)
-        tk.Label(win, text="write) - not USB, not Parsec, not the game itself.",
-                 font=("Segoe UI", 8), fg="#888888").place(x=10, y=54)
+        # Just the conversion step: how long it takes this script to write a
+        # press to the virtual pad once it's seen it. No poll-wait mixed in.
+        headline_var = tk.StringVar(value="Extra lag: -- ms")
+        tk.Label(win, textvariable=headline_var, font=("Segoe UI", 16, "bold")).place(x=10, y=40)
 
-        last_var = tk.StringVar(value="Last press: -")
-        tk.Label(win, textvariable=last_var, font=("Consolas", 10)).place(x=10, y=84)
+        tk.Label(win, text="(time to write your press to the virtual pad, once this",
+                 font=("Segoe UI", 8), fg="#888888").place(x=10, y=70)
+        tk.Label(win, text="script has seen it - not USB, Parsec, or the game)",
+                 font=("Segoe UI", 8), fg="#888888").place(x=10, y=84)
+        tk.Label(win, text="Press buttons on the selected controller to measure.",
+                 font=("Segoe UI", 8), fg="#888888").place(x=10, y=102)
 
-        avg_var = tk.StringVar(value="No presses yet.")
-        tk.Label(win, textvariable=avg_var, font=("Consolas", 10)).place(x=10, y=110)
+        details_var = tk.StringVar(value="No presses yet.")
+        tk.Label(win, textvariable=details_var, font=("Consolas", 8), fg="#888888",
+                 justify="left").place(x=10, y=126)
 
         tk.Label(win, text="(for reference: one frame at 60fps = 16.6 ms)",
-                 font=("Segoe UI", 8), fg="#888888").place(x=10, y=150)
+                 font=("Segoe UI", 8), fg="#888888").place(x=10, y=164)
 
         test_pad = None
         try:
@@ -1210,29 +1334,31 @@ def cmd_gui():
             test_pad = vg.VX360Gamepad()
             A = vg.XUSB_BUTTON.XUSB_GAMEPAD_A
         except Exception as e:
-            avg_var.set(f"Couldn't create a test pad: {e}")
+            details_var.set(f"Couldn't create a test pad: {e}")
 
         samples = []
         closed = {"v": False}
 
         def on_close():
+            nonlocal test_pad
             closed["v"] = True
             main_poll_paused["v"] = False
+            if test_pad is not None:
+                try:
+                    test_pad.reset()
+                    test_pad.update()
+                except Exception:
+                    pass
+                test_pad = None  # same as release_pad: let it get unplugged
             win.destroy()
 
         win.protocol("WM_DELETE_WINDOW", on_close)
-
-        last_check = {"t": time.perf_counter()}
 
         def tick():
             if closed["v"]:
                 return
             idx = combo.current()
             j = cards[idx]["j"] if 0 <= idx < len(cards) else None
-
-            now = time.perf_counter()
-            wait_ms = (now - last_check["t"]) * 1000.0
-            last_check["t"] = now
 
             if j is not None:
                 for ev in pygame.event.get():
@@ -1246,13 +1372,14 @@ def cmd_gui():
                         test_pad.reset()
                         test_pad.update()
                         convert_ms = (time.perf_counter() - t0) * 1000.0
-                        total_ms = wait_ms + convert_ms
-                        samples.append(total_ms)
-                        last_var.set(f"Last press: wait {wait_ms:5.2f}ms + convert "
-                                      f"{convert_ms:5.2f}ms = {total_ms:6.2f}ms")
-                        n = len(samples)
-                        avg_var.set(f"{n} presses - avg {sum(samples) / n:.2f}ms, "
-                                     f"max {max(samples):.2f}ms")
+                        samples.append(convert_ms)
+                        # recent-window average, not all-time, so an early one-off
+                        # slow sample (window warmup) doesn't drag it down forever
+                        recent = samples[-20:]
+                        avg = sum(recent) / len(recent)
+                        headline_var.set(f"Extra lag: ~{avg:.2f} ms")
+                        details_var.set(f"last press: {convert_ms:.2f}ms  |  "
+                                         f"{len(samples)} presses total, max {max(recent):.2f}ms recent")
             win.after(CONFIG["poll_ms"], tick)
 
         tick()
