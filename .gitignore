@@ -3,3 +3,6 @@ __pycache__/
 logs/
 session.json
 profiles.json
+.ai_context.md
+play_test.log
+play_test_err.log
